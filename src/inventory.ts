@@ -528,9 +528,10 @@ export class InventorySystem {
     this.scene = scene;
     this.loader = loader;
 
-    // Seed Slot 1 (Thompson M1 SMG) and Slot 2 (KA-BAR Knife) as the 2 major story weapons
+    // Seed Slot 1 (Thompson M1 SMG), Slot 2 (KA-BAR Knife) & Slot 3 (60 spare .45 ACP rounds for reloading)
     this.slots[0] = this.createItemFromTemplate('thompson_smg', 1);
     this.slots[1] = this.createItemFromTemplate('kabar_knife', 1);
+    this.slots[2] = this.createItemFromTemplate('ammo_45_acp', 60);
 
     this.buildHotbarDom();
     this.refreshHud();
@@ -831,23 +832,47 @@ export class InventorySystem {
     return tpl;
   }
 
-  reloadActiveWeapon(): { started: boolean; needed: number; loaded: number } {
+  canReloadActiveWeapon(): {
+    canReload: boolean;
+    reason?: 'no_weapon' | 'full' | 'no_ammo';
+    needed: number;
+    reserve: number;
+  } {
     const item = this.activeItem;
     if (!item || item.kind !== 'weapon' || !item.caliber) {
-      return { started: false, needed: 0, loaded: 0 };
+      return { canReload: false, reason: 'no_weapon', needed: 0, reserve: 0 };
     }
     if (item.clip >= item.maxClip) {
-      return { started: false, needed: 0, loaded: 0 };
+      return { canReload: false, reason: 'full', needed: 0, reserve: this.getCaliberReserve(item.caliber) };
     }
     const needed = item.maxClip - item.clip;
     const reserve = this.getCaliberReserve(item.caliber);
     if (reserve <= 0) {
-      return { started: false, needed, loaded: 0 };
+      return { canReload: false, reason: 'no_ammo', needed, reserve: 0 };
     }
+    return { canReload: true, needed, reserve };
+  }
+
+  completeReloadActiveWeapon(): { loaded: number; needed: number } {
+    const item = this.activeItem;
+    if (!item || item.kind !== 'weapon' || !item.caliber) {
+      return { loaded: 0, needed: 0 };
+    }
+    const needed = Math.max(0, item.maxClip - item.clip);
+    if (needed === 0) return { loaded: 0, needed: 0 };
     const taken = this.consumeCaliberAmmo(item.caliber, needed);
     item.clip += taken;
     this.refreshHud();
-    return { started: true, needed, loaded: taken };
+    return { loaded: taken, needed };
+  }
+
+  reloadActiveWeapon(): { started: boolean; needed: number; loaded: number } {
+    const check = this.canReloadActiveWeapon();
+    if (!check.canReload) {
+      return { started: false, needed: check.needed, loaded: 0 };
+    }
+    const res = this.completeReloadActiveWeapon();
+    return { started: res.loaded > 0, needed: res.needed, loaded: res.loaded };
   }
 
   applyDamage(amount: number, _reason = 'Injury') {
