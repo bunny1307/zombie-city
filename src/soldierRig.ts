@@ -14,6 +14,8 @@ export type WeaponGripPose =
 
 export interface SoldierAnimState {
   speed: number;
+  forwardSpeed?: number; // + forward, - backward
+  strafeSpeed?: number;  // + right, - left
   isSprinting: boolean;
   isGrounded: boolean;
   isOnStairs: boolean;
@@ -25,6 +27,7 @@ export interface SoldierAnimState {
   isAiming: boolean;
   attackProgress: number; // 0 = idle, (0..1] across strike/shot/throw/eat
   isReloading: boolean;
+  reloadProgress?: number; // 0..1 across reload phases
   aimTarget?: THREE.Vector3; // 3D world position where the crosshair is aiming
 }
 
@@ -57,6 +60,8 @@ export class AnimatedSoldierRig {
 
   private idlePhase = 0;
   private walkCycle = 0;
+  private moveBlend = 0;
+  private sprintBlend = 0;
   private crouchBlend = 0;
   private airTime = 0;
 
@@ -333,18 +338,28 @@ export class AnimatedSoldierRig {
     }
 
     const trueJumpAir = !state.isGrounded && !state.isOnStairs && this.airTime > 0.14;
-    const isMoving = state.speed > 0.35;
+    const isMoving = state.speed > 0.3;
+    const fwdSpeed = state.forwardSpeed ?? state.speed;
+    const strafeSpeed = state.strafeSpeed ?? 0;
+    const targetMove = isMoving ? Math.min(1, state.speed / 4.2) : 0;
+    const targetSprint = isMoving && state.isSprinting && fwdSpeed > 1.0 && !state.isAiming ? 1 : 0;
+    this.moveBlend += (targetMove - this.moveBlend) * Math.min(delta * 10, 1);
+    this.sprintBlend += (targetSprint - this.sprintBlend) * Math.min(delta * 8, 1);
 
-    // 1. LOWER BODY (Hips + Knees + Ground-Anchored Pelvis Kinematics)
-    let leftHipRx = 0;
-    let rightHipRx = 0;
-    let leftKneeRx = 0.08;
-    let rightKneeRx = 0.08;
-    let leftHipRz = 0;
-    let rightHipRz = 0;
-    let torsoRx = 0;
-    let torsoRy = 0;
-    let bobY = 0;
+    // 1. LOWER BODY (Anatomical Swing/Stance Gait + Hip/Shoulder Counter-Rotation)
+    const idleSway = Math.sin(this.idlePhase * 0.8);
+    const idleShift = Math.cos(this.idlePhase * 0.45);
+    let leftHipRx = -0.04 + idleSway * 0.03;
+    let rightHipRx = 0.04 - idleSway * 0.03;
+    let leftKneeRx = 0.10 + Math.max(0, idleShift) * 0.07;
+    let rightKneeRx = 0.10 + Math.max(0, -idleShift) * 0.07;
+    let leftHipRz = 0.025;
+    let rightHipRz = -0.025;
+    let pelvisRy = 0;
+    let pelvisRz = 0;
+    let torsoRx = 0.02 + Math.sin(this.idlePhase) * 0.015;
+    let torsoRy = Math.sin(this.idlePhase * 0.52) * 0.035;
+    let bobY = Math.sin(this.idlePhase) * 0.006;
 
     if (trueJumpAir) {
       leftHipRx = -0.45;
@@ -352,60 +367,83 @@ export class AnimatedSoldierRig {
       rightHipRx = 0.24;
       rightKneeRx = 0.42;
       torsoRx = 0.12;
-    } else if (isMoving) {
-      const freq = state.isSprinting ? 13.8 : state.isOnStairs ? 10.6 : 9.0;
-      this.walkCycle += delta * freq;
+    } else if (this.moveBlend > 0.01) {
+      const dirSign = fwdSpeed < -0.35 ? -1 : 1;
+      const speedRatio = Math.min(1.2, state.speed / 4.8);
+      const freq = state.isOnStairs ? 9.8 : 7.4 + 3.0 * this.sprintBlend * speedRatio;
+      this.walkCycle += delta * freq * dirSign;
+
       const s = Math.sin(this.walkCycle);
       const c = Math.cos(this.walkCycle);
+      const mb = this.moveBlend;
+      const sb = this.sprintBlend;
+      const strafeRatio = Math.max(-1, Math.min(1, strafeSpeed / 4.8));
+
+      let mLeftHipRx = 0;
+      let mRightHipRx = 0;
+      let mLeftKneeRx = 0.12;
+      let mRightKneeRx = 0.12;
+      let mTorsoRx = 0.04;
+      let mTorsoRy = 0;
+      let mBobY = 0;
 
       if (state.isOnStairs && state.stairDirection < 0) {
-        const stepSwing = 0.56;
-        leftHipRx = s * stepSwing - 0.12;
-        rightHipRx = -s * stepSwing - 0.12;
-        leftKneeRx = 0.38 + Math.max(0, -c) * 0.62;
-        rightKneeRx = 0.38 + Math.max(0, c) * 0.62;
-        bobY = Math.abs(c) * 0.035;
-        torsoRx = 0.12;
-        torsoRy = c * 0.08;
+        const stepSwing = 0.50;
+        mLeftHipRx = -s * stepSwing - 0.10;
+        mRightHipRx = s * stepSwing - 0.10;
+        mLeftKneeRx = 0.34 + Math.max(0, c) * 0.52;
+        mRightKneeRx = 0.34 + Math.max(0, -c) * 0.52;
+        mBobY = Math.abs(c) * 0.03;
+        mTorsoRx = 0.08;
+        mTorsoRy = s * 0.06;
       } else if (state.isOnStairs && state.stairDirection > 0) {
-        const stepSwing = 0.68;
-        leftHipRx = s * stepSwing - 0.18;
-        rightHipRx = -s * stepSwing - 0.18;
-        leftKneeRx = 0.24 + Math.max(0, -s) * 0.92;
-        rightKneeRx = 0.24 + Math.max(0, s) * 0.92;
-        bobY = Math.abs(s) * 0.04;
-        torsoRx = 0.16;
-        torsoRy = c * 0.08;
+        const stepSwing = 0.62;
+        mLeftHipRx = -s * stepSwing - 0.18;
+        mRightHipRx = s * stepSwing - 0.18;
+        mLeftKneeRx = 0.22 + Math.max(0, c) * 0.85;
+        mRightKneeRx = 0.22 + Math.max(0, -c) * 0.85;
+        mBobY = Math.abs(c) * 0.035;
+        mTorsoRx = 0.16;
+        mTorsoRy = s * 0.06;
       } else {
-        const swing = state.isSprinting ? 0.74 : this.crouchBlend > 0.5 ? 0.38 : 0.50;
-        leftHipRx = s * swing;
-        rightHipRx = -s * swing;
-        leftKneeRx = 0.10 + Math.max(0, c) * (state.isSprinting ? 1.05 : 0.72);
-        rightKneeRx = 0.10 + Math.max(0, -c) * (state.isSprinting ? 1.05 : 0.72);
-        bobY = Math.abs(s) * (state.isSprinting ? 0.045 : 0.028);
-        torsoRx = state.isSprinting ? 0.17 : 0.05;
-        torsoRy = c * 0.075;
+        // Smooth dual-phase athletic gait: swing recovery curl when cos(θ) > 0, soft stance cushion
+        // when landing, and gentle heel lift on trailing push-off (no rigid leg lock or sudden snap).
+        const isBack = dirSign < 0;
+        const swing = isBack ? 0.34 : 0.42 + 0.24 * sb;
+        const fwdBias = isBack ? 0.04 : -0.08 * sb;
+        mLeftHipRx = -s * swing + fwdBias;
+        mRightHipRx = s * swing + fwdBias;
+
+        const swingKnee = isBack ? 0.36 : 0.44 + 0.42 * sb;
+        const strikeFlex = isBack ? 0.14 : 0.16 + 0.14 * sb;
+        const rearCurl = isBack ? 0 : 0.14 + 0.22 * sb;
+        mLeftKneeRx = strikeFlex + Math.max(0, c) * swingKnee + Math.max(0, -s) * rearCurl;
+        mRightKneeRx = strikeFlex + Math.max(0, -c) * swingKnee + Math.max(0, s) * rearCurl;
+
+        mBobY = Math.abs(s) * (0.018 + 0.022 * sb) - 0.016 * sb;
+        mTorsoRx = isBack ? -0.04 : 0.05 + 0.12 * sb;
+        pelvisRy = s * (0.045 + 0.035 * sb) * mb;
+        mTorsoRy = -s * (0.065 + 0.065 * sb);
+        pelvisRz = (-strafeRatio * 0.04 + c * 0.02) * mb;
+        leftHipRz = 0.025 + Math.abs(strafeRatio) * (0.05 + 0.07 * Math.max(0, s)) * mb;
+        rightHipRz = -0.025 - Math.abs(strafeRatio) * (0.05 + 0.07 * Math.max(0, -s)) * mb;
       }
-    } else {
-      const sway = Math.sin(this.idlePhase * 0.8);
-      const shift = Math.cos(this.idlePhase * 0.45);
-      leftHipRx = -0.04 + sway * 0.035;
-      rightHipRx = 0.04 - sway * 0.035;
-      leftKneeRx = 0.10 + Math.max(0, shift) * 0.08;
-      rightKneeRx = 0.10 + Math.max(0, -shift) * 0.08;
-      leftHipRz = 0.025;
-      rightHipRz = -0.025;
-      bobY = Math.sin(this.idlePhase) * 0.008;
-      torsoRx = 0.02 + Math.sin(this.idlePhase) * 0.018;
-      torsoRy = Math.sin(this.idlePhase * 0.52) * 0.045;
+
+      leftHipRx = leftHipRx * (1 - mb) + mLeftHipRx * mb;
+      rightHipRx = rightHipRx * (1 - mb) + mRightHipRx * mb;
+      leftKneeRx = leftKneeRx * (1 - mb) + mLeftKneeRx * mb;
+      rightKneeRx = rightKneeRx * (1 - mb) + mRightKneeRx * mb;
+      torsoRx = torsoRx * (1 - mb) + mTorsoRx * mb;
+      torsoRy = torsoRy * (1 - mb) + mTorsoRy * mb;
+      bobY = bobY * (1 - mb) + mBobY * mb;
     }
 
     if (this.crouchBlend > 0.001) {
       const cb = this.crouchBlend;
-      const crouchHipL = -0.94 + (isMoving ? Math.sin(this.walkCycle) * 0.24 : 0);
-      const crouchHipR = -1.06 + (isMoving ? -Math.sin(this.walkCycle) * 0.24 : 0);
-      const crouchKneeL = 1.56 + (isMoving ? Math.max(0, Math.cos(this.walkCycle)) * 0.28 : 0);
-      const crouchKneeR = 1.70 + (isMoving ? Math.max(0, -Math.cos(this.walkCycle)) * 0.28 : 0);
+      const crouchHipL = -0.94 - (isMoving ? Math.sin(this.walkCycle) * 0.22 * this.moveBlend : 0);
+      const crouchHipR = -1.06 + (isMoving ? Math.sin(this.walkCycle) * 0.22 * this.moveBlend : 0);
+      const crouchKneeL = 1.56 + (isMoving ? Math.max(0, Math.cos(this.walkCycle)) * 0.28 * this.moveBlend : 0);
+      const crouchKneeR = 1.70 + (isMoving ? Math.max(0, -Math.cos(this.walkCycle)) * 0.28 * this.moveBlend : 0);
 
       leftHipRx = leftHipRx * (1 - cb) + crouchHipL * cb;
       rightHipRx = rightHipRx * (1 - cb) + crouchHipR * cb;
@@ -427,11 +465,15 @@ export class AnimatedSoldierRig {
       shinLen * Math.cos(Math.min(1.4, Math.abs(leftHipRx + leftKneeRx)));
     const rightY = thighLen * Math.cos(Math.min(1.4, Math.abs(rightHipRx))) +
       shinLen * Math.cos(Math.min(1.4, Math.abs(rightHipRx + rightKneeRx)));
-    this.rootPelvis.position.y = Math.max(0.48, Math.min(leftY, rightY)) + bobY;
+    // Weight pelvis height toward the stance leg so swing-phase knee fold does not drop the torso
+    const stanceWeightedY = Math.max(leftY, rightY) * 0.72 + Math.min(leftY, rightY) * 0.28;
+    this.rootPelvis.position.y = Math.max(0.50, stanceWeightedY) + bobY;
+    this.rootPelvis.rotation.set(0, pelvisRy, pelvisRz);
 
     const isGunGrip = state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle' || state.grip === 'pistol';
     if (isGunGrip) {
-      torsoRx += -state.pitch * 0.28;
+      const clampedPitch = Math.max(-0.45, Math.min(0.45, state.pitch));
+      torsoRx += -clampedPitch * (0.24 * (1 - this.sprintBlend * 0.6));
     }
     this.torsoBone.rotation.set(torsoRx, torsoRy, 0);
     this.headBone.rotation.x = -state.pitch * 0.45 - this.crouchBlend * 0.18;
@@ -576,32 +618,73 @@ export class AnimatedSoldierRig {
       }
       case 'none':
       default: {
-        const armSwing = state.isSprinting ? 0.85 : 0.58;
-        lShX = isMoving ? -0.08 - sWalk * armSwing : -0.10 + breath * 0.06;
-        lElY = isMoving ? -0.48 - Math.max(0, -sWalk) * 0.45 : -0.38 - Math.sin(this.idlePhase * 0.85) * 0.10;
+        // Natural arm counter-swing: right arm swings forward (-rx) when left leg swings forward (sWalk > 0)!
+        const armSwing = (0.48 + 0.42 * this.sprintBlend) * this.moveBlend;
+        const swingWave = sWalk * armSwing;
+        lShX = -0.10 + breath * 0.05 * (1 - this.moveBlend) + swingWave;
+        lElY = -0.36 - 0.48 * this.sprintBlend - Math.max(0, -swingWave) * 0.52;
         rShX = state.flashlightOn
           ? -1.22 + (isMoving ? sWalk * 0.08 : breath * 0.03)
-          : isMoving
-          ? -0.08 + sWalk * armSwing
-          : -0.12 - breath * 0.06;
+          : -0.10 - breath * 0.05 * (1 - this.moveBlend) - swingWave;
         rElY = state.flashlightOn
           ? 0.28
-          : isMoving
-          ? 0.48 + Math.max(0, sWalk) * 0.45
-          : 0.38 + Math.cos(this.idlePhase * 0.75) * 0.10;
-        lShZ = -armDrop + (isMoving ? 0.04 : Math.sin(this.idlePhase * 0.6) * 0.03);
-        rShZ = armDrop - (isMoving ? 0.04 : Math.cos(this.idlePhase * 0.6) * 0.03);
+          : 0.36 + 0.48 * this.sprintBlend + Math.max(0, swingWave) * 0.52;
+        lShZ = -armDrop + (0.04 * this.moveBlend + Math.sin(this.idlePhase * 0.6) * 0.025 * (1 - this.moveBlend));
+        rShZ = armDrop - (0.04 * this.moveBlend + Math.cos(this.idlePhase * 0.6) * 0.025 * (1 - this.moveBlend));
         break;
       }
     }
 
+    // Subtle athletic low-ready sprint tilt for long guns (smoothly blended without sudden sideways snap)
+    if (
+      this.sprintBlend > 0.02 &&
+      !state.isAiming &&
+      atk <= 0 &&
+      !state.isReloading &&
+      (state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle')
+    ) {
+      const sb = this.sprintBlend;
+      const pump = sWalk * 0.12;
+      rShX = rShX * (1 - sb) + (-0.48 + pump) * sb;
+      rShY = rShY * (1 - sb) + 0.26 * sb;
+      rElY = rElY * (1 - sb) + 1.32 * sb;
+      lShX = lShX * (1 - sb) + (-0.68 - pump) * sb;
+      lShY = lShY * (1 - sb) + (-0.48) * sb;
+      lElY = lElY * (1 - sb) + (-1.28) * sb;
+    }
+
     if (state.isReloading && state.grip !== 'none' && state.grip !== 'knife' && state.grip !== 'food' && state.grip !== 'grenade') {
-      const relWave = Math.sin(this.idlePhase * 2.5);
-      rShX += 0.24;
-      rElY = 1.55;
-      lShX = -0.58 + relWave * 0.18;
-      lShY = -0.55;
-      lElY = -1.65;
+      const p = state.reloadProgress ?? 0.5;
+      if (p < 0.35) {
+        // Stage 1: Tilt weapon & drop spent magazine
+        const t = p / 0.35;
+        rShX += 0.22 * t;
+        rShY = 0.25 * t;
+        rElY = 1.48;
+        lShX = -0.35 - 0.15 * t;
+        lShY = -0.35;
+        lElY = -0.95;
+      } else if (p < 0.75) {
+        // Stage 2: Bring fresh magazine from pouch up into receiver
+        const t = (p - 0.35) / 0.4;
+        const thrust = Math.sin(t * Math.PI);
+        rShX += 0.22;
+        rShY = 0.25;
+        rElY = 1.52;
+        lShX = -0.50 - 0.42 * thrust;
+        lShY = -0.55;
+        lElY = -1.35 - 0.45 * thrust;
+      } else {
+        // Stage 3: Rack charging handle & return to ready
+        const t = (p - 0.75) / 0.25;
+        const rack = Math.sin(t * Math.PI);
+        rShX += 0.22 * (1 - t);
+        rShY = 0.25 * (1 - t);
+        rElY = 1.48 - 0.2 * t;
+        lShX = -0.78 + 0.25 * rack;
+        lShY = -0.46;
+        lElY = -1.55 + 0.25 * rack;
+      }
     }
 
     if (state.grip !== 'none' && state.flashlightOn) {
@@ -613,8 +696,15 @@ export class AnimatedSoldierRig {
     this.rightShoulder.rotation.set(rShX, rShY, rShZ);
     this.rightElbow.rotation.set(0, rElY, 0);
 
-    // 3. DYNAMIC GUN AIMING: Align weapon barrel to point directly at crosshair target in world space
+    // 3. DYNAMIC GUN AIMING: Align weapon barrel to point toward crosshair target with smooth sprint slerp
     const isGun = state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle' || state.grip === 'pistol';
+    const readyQuat = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(
+        Math.PI / 2 + 0.22 * this.sprintBlend,
+        Math.PI / 2 + 0.16 * this.sprintBlend,
+        0
+      )
+    );
     if (isGun && state.aimTarget && !state.isReloading) {
       // Ensure right elbow world matrix is computed with latest bone rotations
       this.rightElbow.updateWorldMatrix(true, false);
@@ -634,12 +724,13 @@ export class AnimatedSoldierRig {
         this.rightElbow.getWorldQuaternion(elbowWorldQuat);
         const localQuat = elbowWorldQuat.clone().invert().multiply(desiredWorldQuat);
 
-        this.rightHandMount.quaternion.copy(localQuat);
+        const sprintCant = state.isAiming || atk > 0 || state.grip === 'pistol' ? 0 : this.sprintBlend * 0.65;
+        this.rightHandMount.quaternion.copy(localQuat).slerp(readyQuat, sprintCant);
         this.rightHandMount.updateWorldMatrix(true, false);
       }
     } else {
-      // Default resting holding pose
-      this.rightHandMount.rotation.set(Math.PI / 2, Math.PI / 2, 0);
+      // Default resting / reload holding pose
+      this.rightHandMount.quaternion.copy(readyQuat);
     }
   }
 }

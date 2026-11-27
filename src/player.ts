@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { SpatialCollisionSystem } from './collision.ts';
 import { AnimatedSoldierRig, WeaponGripPose } from './soldierRig.ts';
 import { InventorySystem } from './inventory.ts';
+import { ReloadSystem, ReloadStateSnapshot } from './reloadSystem.ts';
+import { ControlsSettingsManager } from './controlsSettings.ts';
 
 interface TracerEffect {
   mesh: THREE.Mesh;
@@ -73,7 +75,15 @@ export class PlayerController {
   private fireCooldown = 0;
   private actionTimer = 0;
   private actionDuration = 0.2;
-  private reloadTimer = 0;
+  private reloadSystem: ReloadSystem | null = null;
+  private reloadSnapshot: ReloadStateSnapshot = {
+    isReloading: false,
+    progress: 0,
+    stage: 'none',
+    remainingSec: 0,
+    durationSec: 0
+  };
+  private controlsSettings!: ControlsSettingsManager;
   private pendingGrenadeThrow = false;
   private grenadeThrownInSwing = false;
 
@@ -143,17 +153,56 @@ export class PlayerController {
     this.scene.add(this.tpvMuzzleFlash);
 
     this.createFpvViewmodel();
+    this.controlsSettings = new ControlsSettingsManager(this.domElement, {
+      onFireStart: () => {
+        if (this.controlsSettings.isSettingsOpen) return;
+        this.isLeftMouseDown = true;
+        this.triggerPrimaryUse();
+      },
+      onFireEnd: () => {
+        this.isLeftMouseDown = false;
+      },
+      onAimToggle: () => {
+        this.isAiming = !this.isAiming;
+        this.targetFov = this.isAiming ? 46 : 62;
+      },
+      onReload: () => this.tryStartReload(),
+      onJump: () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+        window.setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space' })), 80);
+      },
+      onCrouchToggle: () => {
+        this.isCrouching = !this.isCrouching;
+      },
+      onCameraToggle: () => this.toggleCameraMode(),
+      onFlashlightToggle: () => {
+        this.flashlightOn = !this.flashlightOn;
+        this.flashlight.intensity = this.flashlightOn ? 18.0 : 0;
+      },
+      onLookDelta: (dx, dy) => {
+        if (this.controlsSettings.isSettingsOpen) return;
+        const sensitivity = this.controlsSettings.getEffectiveTouchSensitivity(this.isAiming);
+        this.yaw -= dx * sensitivity;
+        this.pitch -= dy * sensitivity * this.controlsSettings.getYSign();
+        const maxPitch = Math.PI / 2 - 0.05;
+        this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
+      }
+    });
     this.setupEventListeners();
   }
 
   setInventory(inventory: InventorySystem) {
     this.inventory = inventory;
-    this.inventory.onSelectionChanged(() => this.syncEquippedWeapon());
+    this.reloadSystem = new ReloadSystem(inventory, (stage) => this.playProceduralTone(stage));
+    this.inventory.onSelectionChanged(() => {
+      this.reloadSystem?.cancelReload();
+      this.syncEquippedWeapon();
+    });
     this.inventory.onPlayerDeath(() => {
       // Respawn cleanly on Ground Plaza with all weapons preserved in 10-slot inventory!
       this.teleport(-2.5, 0.25, 16.5, 0);
       this.isCrouching = false;
-      this.reloadTimer = 0;
+      this.reloadSystem?.cancelReload();
     });
     this.syncEquippedWeapon();
   }
@@ -254,17 +303,19 @@ export class PlayerController {
       if (this.inventory) {
         if (e.code >= 'Digit1' && e.code <= 'Digit9') {
           this.inventory.selectSlot(Number(e.code.replace('Digit', '')) - 1);
-          this.reloadTimer = 0;
+          this.reloadSystem?.cancelReload();
           return;
         }
         if (e.code === 'Digit0') {
           this.inventory.selectSlot(9);
-          this.reloadTimer = 0;
+          this.reloadSystem?.cancelReload();
           return;
         }
       }
 
-      if (e.code === 'KeyV') {
+      if (e.code === 'KeyO') {
+        this.controlsSettings?.toggleSettingsPanel();
+      } else if (e.code === 'KeyV') {
         this.toggleCameraMode();
       } else if (e.code === 'KeyF') {
         this.flashlightOn = !this.flashlightOn;
@@ -294,17 +345,18 @@ export class PlayerController {
     window.addEventListener(
       'wheel',
       (e) => {
-        if (!this.inventory) return;
+        if (!this.inventory || this.controlsSettings?.isSettingsOpen) return;
         const dir = e.deltaY > 0 ? 1 : -1;
         const next = (this.inventory.activeSlot + dir + 10) % 10;
         this.inventory.selectSlot(next);
-        this.reloadTimer = 0;
+        this.reloadSystem?.cancelReload();
       },
       { passive: true }
     );
 
     let isDraggingLook = false;
     this.domElement.addEventListener('mousedown', (e) => {
+      if (this.controlsSettings?.isSettingsOpen) return;
       if (e.button === 0) {
         this.isLeftMouseDown = true;
         if (!this.isPointerLocked) {
@@ -338,10 +390,13 @@ export class PlayerController {
     });
 
     document.addEventListener('mousemove', (e) => {
-      if (!this.isPointerLocked && !isDraggingLook) return;
-      const sensitivity = this.isAiming ? 0.0011 : 0.0021;
-      this.yaw -= e.movementX * sensitivity;
-      this.pitch -= e.movementY * sensitivity;
+      if ((!this.isPointerLocked && !isDraggingLook) || this.controlsSettings?.isSettingsOpen) return;
+      const sensitivity = this.controlsSettings.getEffectiveMouseSensitivity(this.isAiming);
+      // Clamp pointer-lock delta spikes on focus regain so the camera never snaps violently
+      const dx = Math.max(-120, Math.min(120, e.movementX));
+      const dy = Math.max(-120, Math.min(120, e.movementY));
+      this.yaw -= dx * sensitivity;
+      this.pitch -= dy * sensitivity * this.controlsSettings.getYSign();
       const maxPitch = Math.PI / 2 - 0.05;
       this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
     });
@@ -350,18 +405,12 @@ export class PlayerController {
   }
 
   tryStartReload() {
-    if (!this.inventory || this.reloadTimer > 0) return;
-    const item = this.inventory.activeItem;
-    if (!item || item.kind !== 'weapon') return;
-    const res = this.inventory.reloadActiveWeapon();
-    if (res.started) {
-      this.reloadTimer = 1.05;
-      this.playProceduralTone('reload');
-    }
+    if (!this.reloadSystem) return;
+    this.reloadSystem.tryStartReload();
   }
 
   triggerPrimaryUse() {
-    if (!this.inventory || this.fireCooldown > 0 || this.reloadTimer > 0) return;
+    if (!this.inventory || this.fireCooldown > 0 || this.reloadSystem?.reloading) return;
     const item = this.inventory.activeItem;
     const tpl = this.inventory.activeTemplate;
     if (!item || !tpl) return;
@@ -675,9 +724,8 @@ export class PlayerController {
 
   private updateCombatAndProjectiles(delta: number) {
     if (this.fireCooldown > 0) this.fireCooldown -= delta;
-    if (this.reloadTimer > 0) {
-      this.reloadTimer -= delta;
-      if (this.reloadTimer < 0) this.reloadTimer = 0;
+    if (this.reloadSystem) {
+      this.reloadSnapshot = this.reloadSystem.update(delta);
     }
     if (this.actionTimer > 0) {
       this.actionTimer -= delta;
@@ -698,7 +746,7 @@ export class PlayerController {
     }
 
     // Continuous full-auto trigger when holding LMB with an automatic gun
-    if (this.isLeftMouseDown && this.inventory && this.fireCooldown <= 0 && this.reloadTimer <= 0) {
+    if (this.isLeftMouseDown && this.inventory && this.fireCooldown <= 0 && !this.reloadSystem?.reloading) {
       const tpl = this.inventory.activeTemplate;
       if (tpl?.kind === 'weapon' && tpl.automatic) {
         this.triggerPrimaryUse();
@@ -828,7 +876,7 @@ export class PlayerController {
   /**
    * Realistic percussive acoustic synthesis for real-world gunfire transients, blasts, knife slashes & foley.
    */
-  private playProceduralTone(kind: 'smg' | 'shotgun' | 'rifle' | 'pistol' | 'knife' | 'reload' | 'throw' | 'explosion' | 'eat') {
+  private playProceduralTone(kind: 'smg' | 'shotgun' | 'rifle' | 'pistol' | 'knife' | 'reload' | 'mag_out' | 'mag_in' | 'bolt_rack' | 'throw' | 'explosion' | 'eat') {
     const ctx = this.ensureAudioContext();
     if (!ctx || !this.noiseBuffer) return;
     const now = ctx.currentTime;
@@ -892,6 +940,13 @@ export class PlayerController {
     } else if (kind === 'reload') {
       triggerNoiseBurst(0, 0.035, 'bandpass', 2400, 1600, 0.09, 3.0);
       triggerNoiseBurst(0.14, 0.04, 'bandpass', 3200, 1800, 0.11, 2.8);
+    } else if (kind === 'mag_out') {
+      triggerNoiseBurst(0, 0.04, 'bandpass', 2100, 1300, 0.11, 3.2);
+    } else if (kind === 'mag_in') {
+      triggerNoiseBurst(0, 0.045, 'bandpass', 1650, 2400, 0.13, 3.0);
+    } else if (kind === 'bolt_rack') {
+      triggerNoiseBurst(0, 0.035, 'bandpass', 3400, 2100, 0.12, 3.2);
+      triggerNoiseBurst(0.06, 0.04, 'bandpass', 4000, 2500, 0.14, 3.4);
     } else if (kind === 'eat') {
       triggerNoiseBurst(0, 0.09, 'bandpass', 900, 420, 0.06, 1.4);
       triggerNoiseBurst(0.16, 0.08, 'bandpass', 850, 380, 0.055, 1.4);
@@ -987,13 +1042,20 @@ export class PlayerController {
 
     // Keyboard camera look fallback
     const maxPitch = Math.PI / 2 - 0.05;
-    if (this.keys['ArrowLeft']) this.yaw += 2.1 * delta;
-    if (this.keys['ArrowRight']) this.yaw -= 2.1 * delta;
-    if (this.keys['ArrowUp']) this.pitch = Math.min(maxPitch, this.pitch + 1.5 * delta);
-    if (this.keys['ArrowDown']) this.pitch = Math.max(-maxPitch, this.pitch - 1.5 * delta);
+    const yawRate = this.controlsSettings.getKeyboardYawSpeed();
+    if (this.keys['ArrowLeft']) this.yaw += yawRate * delta;
+    if (this.keys['ArrowRight']) this.yaw -= yawRate * delta;
+    // Keep ArrowUp/ArrowDown for movement (same as W/S) so Shift+UpArrow runs cleanly instead of staring skyward;
+    // optional keyboard pitch uses PageUp/PageDown without hijacking movement keys.
+    const pitchRate = this.controlsSettings.getKeyboardPitchSpeed() * this.controlsSettings.getYSign();
+    if (this.keys['PageUp']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch + pitchRate * delta));
+    if (this.keys['PageDown']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch - pitchRate * delta));
 
     const hasEnergyForSprint = !this.inventory || this.inventory.energy > 4;
-    const isSprinting = (this.keys['ShiftLeft'] || this.keys['ShiftRight']) && !this.isCrouching && hasEnergyForSprint;
+    const isSprinting =
+      (this.keys['ShiftLeft'] || this.keys['ShiftRight'] || this.controlsSettings.touchSprint) &&
+      !this.isCrouching &&
+      hasEnergyForSprint;
     const baseSpeed = this.isCrouching ? 2.7 : isSprinting ? 8.4 : 4.8;
     const moveSpeed = this.isAiming ? baseSpeed * 0.55 : baseSpeed;
 
@@ -1001,10 +1063,14 @@ export class PlayerController {
     const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).normalize();
 
     const inputDirection = new THREE.Vector3();
-    if (this.keys['KeyW']) inputDirection.add(forward);
-    if (this.keys['KeyS']) inputDirection.sub(forward);
-    if (this.keys['KeyD']) inputDirection.add(right);
-    if (this.keys['KeyA']) inputDirection.sub(right);
+    const keyFwd =
+      (this.keys['KeyW'] || this.keys['ArrowUp'] ? 1 : 0) -
+      (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0);
+    const keyStrafe = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
+    const fwdAxis = Math.max(-1, Math.min(1, keyFwd + this.controlsSettings.moveZ));
+    const strafeAxis = Math.max(-1, Math.min(1, keyStrafe + this.controlsSettings.moveX));
+    if (Math.abs(fwdAxis) > 0.02) inputDirection.addScaledVector(forward, fwdAxis);
+    if (Math.abs(strafeAxis) > 0.02) inputDirection.addScaledVector(right, strafeAxis);
 
     if (inputDirection.lengthSq() > 0.01) {
       inputDirection.normalize();
@@ -1152,8 +1218,14 @@ export class PlayerController {
     const crosshair = this.getCrosshairTarget(120);
 
     // Animate 11-bone soldier skeleton with crosshair aim target
+    const axisNorm = Math.hypot(fwdAxis, strafeAxis);
+    const normFwd = axisNorm > 1e-3 ? fwdAxis / Math.max(1, axisNorm) : 0;
+    const normStrafe = axisNorm > 1e-3 ? strafeAxis / Math.max(1, axisNorm) : 0;
+
     this.soldierRig.animate(delta, {
       speed: horizontalSpeed,
+      forwardSpeed: horizontalSpeed * normFwd,
+      strafeSpeed: horizontalSpeed * normStrafe,
       isSprinting,
       isGrounded: this.isGrounded,
       isOnStairs: this.isOnStairs,
@@ -1163,7 +1235,8 @@ export class PlayerController {
       grip,
       isAiming: this.isAiming,
       attackProgress: actionProgress,
-      isReloading: this.reloadTimer > 0,
+      isReloading: this.reloadSnapshot.isReloading,
+      reloadProgress: this.reloadSnapshot.progress,
       pitch: this.pitch,
       aimTarget: crosshair.point
     });
@@ -1202,10 +1275,24 @@ export class PlayerController {
       rz = 0.0;
     }
 
-    if (this.reloadTimer > 0) {
-      rx = -0.26;
-      rz = 0.22;
-      py -= 0.04;
+    if (this.reloadSnapshot.isReloading) {
+      const rp = this.reloadSnapshot.progress;
+      if (rp < 0.35) {
+        const k = rp / 0.35;
+        rx = -0.32 * k;
+        rz = 0.28 * k;
+        py -= 0.045 * k;
+      } else if (rp < 0.72) {
+        const k = Math.sin(((rp - 0.35) / 0.37) * Math.PI);
+        rx = -0.28;
+        rz = 0.26;
+        py -= 0.04 - k * 0.025;
+      } else {
+        const k = Math.sin(((rp - 0.72) / 0.28) * Math.PI);
+        rx = -0.18 * (1 - k * 0.5);
+        rz = 0.18 * (1 - k * 0.6);
+        py -= 0.02 * (1 - k);
+      }
     } else if (actionProgress > 0) {
       if (grip === 'knife') {
         const arc = Math.sin(actionProgress * Math.PI);
@@ -1233,7 +1320,7 @@ export class PlayerController {
 
     const isGun = grip === 'smg' || grip === 'shotgun' || grip === 'rifle' || grip === 'pistol';
     // Dynamically angle gun barrel to point directly along line to crosshair target
-    if (isGun && crosshairTargetPoint && this.reloadTimer <= 0) {
+    if (isGun && crosshairTargetPoint && !this.reloadSnapshot.isReloading) {
       const gunCamPos = new THREE.Vector3(px + bobX, py + bobY, pz);
       const targetCam = this.camera.worldToLocal(crosshairTargetPoint.clone());
       const aimVec = targetCam.clone().sub(gunCamPos);
