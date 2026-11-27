@@ -369,8 +369,8 @@ export class AnimatedSoldierRig {
       torsoRx = 0.12;
     } else if (this.moveBlend > 0.01) {
       const dirSign = fwdSpeed < -0.35 ? -1 : 1;
-      const speedRatio = Math.min(1.4, state.speed / 4.8);
-      const freq = state.isOnStairs ? 9.8 : 7.6 + 4.4 * this.sprintBlend * speedRatio;
+      const speedRatio = Math.min(1.2, state.speed / 4.8);
+      const freq = state.isOnStairs ? 9.8 : 7.4 + 3.0 * this.sprintBlend * speedRatio;
       this.walkCycle += delta * freq * dirSign;
 
       const s = Math.sin(this.walkCycle);
@@ -406,25 +406,27 @@ export class AnimatedSoldierRig {
         mTorsoRx = 0.16;
         mTorsoRy = s * 0.06;
       } else {
-        // True human gait: -sin(θ) swings leg FORWARD while cos(θ) > 0 (swing phase -> high knee tuck);
-        // when cos(θ) < 0 (stance phase -> foot planted pushing back), knee stays mostly extended!
+        // Smooth dual-phase athletic gait: swing recovery curl when cos(θ) > 0, soft stance cushion
+        // when landing, and gentle heel lift on trailing push-off (no rigid leg lock or sudden snap).
         const isBack = dirSign < 0;
-        const swing = isBack ? 0.36 : 0.44 + 0.38 * sb;
-        mLeftHipRx = -s * swing;
-        mRightHipRx = s * swing;
+        const swing = isBack ? 0.34 : 0.42 + 0.24 * sb;
+        const fwdBias = isBack ? 0.04 : -0.08 * sb;
+        mLeftHipRx = -s * swing + fwdBias;
+        mRightHipRx = s * swing + fwdBias;
 
-        const swingKnee = isBack ? 0.38 : 0.52 + 0.62 * sb;
-        const stanceFlex = 0.10 + 0.14 * sb;
-        mLeftKneeRx = 0.08 + Math.max(0, c) * swingKnee + Math.max(0, -c) * stanceFlex;
-        mRightKneeRx = 0.08 + Math.max(0, -c) * swingKnee + Math.max(0, c) * stanceFlex;
+        const swingKnee = isBack ? 0.36 : 0.44 + 0.42 * sb;
+        const strikeFlex = isBack ? 0.14 : 0.16 + 0.14 * sb;
+        const rearCurl = isBack ? 0 : 0.14 + 0.22 * sb;
+        mLeftKneeRx = strikeFlex + Math.max(0, c) * swingKnee + Math.max(0, -s) * rearCurl;
+        mRightKneeRx = strikeFlex + Math.max(0, -c) * swingKnee + Math.max(0, s) * rearCurl;
 
-        mBobY = Math.abs(c) * (0.022 + 0.028 * sb) - (0.015 * sb);
-        mTorsoRx = isBack ? -0.04 : 0.06 + 0.20 * sb;
-        pelvisRy = s * (0.055 + 0.045 * sb) * mb;
-        mTorsoRy = -s * (0.08 + 0.08 * sb);
-        pelvisRz = (-strafeRatio * 0.05 + c * 0.025) * mb;
-        leftHipRz = 0.025 + Math.abs(strafeRatio) * (0.06 + 0.08 * Math.max(0, s)) * mb;
-        rightHipRz = -0.025 - Math.abs(strafeRatio) * (0.06 + 0.08 * Math.max(0, -s)) * mb;
+        mBobY = Math.abs(s) * (0.018 + 0.022 * sb) - 0.016 * sb;
+        mTorsoRx = isBack ? -0.04 : 0.05 + 0.12 * sb;
+        pelvisRy = s * (0.045 + 0.035 * sb) * mb;
+        mTorsoRy = -s * (0.065 + 0.065 * sb);
+        pelvisRz = (-strafeRatio * 0.04 + c * 0.02) * mb;
+        leftHipRz = 0.025 + Math.abs(strafeRatio) * (0.05 + 0.07 * Math.max(0, s)) * mb;
+        rightHipRz = -0.025 - Math.abs(strafeRatio) * (0.05 + 0.07 * Math.max(0, -s)) * mb;
       }
 
       leftHipRx = leftHipRx * (1 - mb) + mLeftHipRx * mb;
@@ -463,12 +465,15 @@ export class AnimatedSoldierRig {
       shinLen * Math.cos(Math.min(1.4, Math.abs(leftHipRx + leftKneeRx)));
     const rightY = thighLen * Math.cos(Math.min(1.4, Math.abs(rightHipRx))) +
       shinLen * Math.cos(Math.min(1.4, Math.abs(rightHipRx + rightKneeRx)));
-    this.rootPelvis.position.y = Math.max(0.48, Math.min(leftY, rightY)) + bobY;
+    // Weight pelvis height toward the stance leg so swing-phase knee fold does not drop the torso
+    const stanceWeightedY = Math.max(leftY, rightY) * 0.72 + Math.min(leftY, rightY) * 0.28;
+    this.rootPelvis.position.y = Math.max(0.50, stanceWeightedY) + bobY;
     this.rootPelvis.rotation.set(0, pelvisRy, pelvisRz);
 
     const isGunGrip = state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle' || state.grip === 'pistol';
     if (isGunGrip) {
-      torsoRx += -state.pitch * 0.28;
+      const clampedPitch = Math.max(-0.45, Math.min(0.45, state.pitch));
+      torsoRx += -clampedPitch * (0.24 * (1 - this.sprintBlend * 0.6));
     }
     this.torsoBone.rotation.set(torsoRx, torsoRy, 0);
     this.headBone.rotation.x = -state.pitch * 0.45 - this.crouchBlend * 0.18;
@@ -630,22 +635,22 @@ export class AnimatedSoldierRig {
       }
     }
 
-    // Tactical across-chest sprint carry for long guns when sprinting & not aiming/shooting/reloading
+    // Subtle athletic low-ready sprint tilt for long guns (smoothly blended without sudden sideways snap)
     if (
-      this.sprintBlend > 0.05 &&
+      this.sprintBlend > 0.02 &&
       !state.isAiming &&
       atk <= 0 &&
       !state.isReloading &&
       (state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle')
     ) {
       const sb = this.sprintBlend;
-      const pump = sWalk * 0.16;
-      rShX = rShX * (1 - sb) + (-0.42 + pump) * sb;
-      rShY = rShY * (1 - sb) + 0.46 * sb;
-      rElY = rElY * (1 - sb) + 1.48 * sb;
-      lShX = lShX * (1 - sb) + (-0.64 - pump) * sb;
-      lShY = lShY * (1 - sb) + (-0.62) * sb;
-      lElY = lElY * (1 - sb) + (-1.45) * sb;
+      const pump = sWalk * 0.12;
+      rShX = rShX * (1 - sb) + (-0.48 + pump) * sb;
+      rShY = rShY * (1 - sb) + 0.26 * sb;
+      rElY = rElY * (1 - sb) + 1.32 * sb;
+      lShX = lShX * (1 - sb) + (-0.68 - pump) * sb;
+      lShY = lShY * (1 - sb) + (-0.48) * sb;
+      lElY = lElY * (1 - sb) + (-1.28) * sb;
     }
 
     if (state.isReloading && state.grip !== 'none' && state.grip !== 'knife' && state.grip !== 'food' && state.grip !== 'grenade') {
@@ -691,10 +696,16 @@ export class AnimatedSoldierRig {
     this.rightShoulder.rotation.set(rShX, rShY, rShZ);
     this.rightElbow.rotation.set(0, rElY, 0);
 
-    // 3. DYNAMIC GUN AIMING: Align weapon barrel to point directly at crosshair target in world space
+    // 3. DYNAMIC GUN AIMING: Align weapon barrel to point toward crosshair target with smooth sprint slerp
     const isGun = state.grip === 'smg' || state.grip === 'shotgun' || state.grip === 'rifle' || state.grip === 'pistol';
-    const isSprintCarry = this.sprintBlend > 0.35 && !state.isAiming && atk <= 0 && state.grip !== 'pistol';
-    if (isGun && state.aimTarget && !state.isReloading && !isSprintCarry) {
+    const readyQuat = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(
+        Math.PI / 2 + 0.22 * this.sprintBlend,
+        Math.PI / 2 + 0.16 * this.sprintBlend,
+        0
+      )
+    );
+    if (isGun && state.aimTarget && !state.isReloading) {
       // Ensure right elbow world matrix is computed with latest bone rotations
       this.rightElbow.updateWorldMatrix(true, false);
 
@@ -713,12 +724,13 @@ export class AnimatedSoldierRig {
         this.rightElbow.getWorldQuaternion(elbowWorldQuat);
         const localQuat = elbowWorldQuat.clone().invert().multiply(desiredWorldQuat);
 
-        this.rightHandMount.quaternion.copy(localQuat);
+        const sprintCant = state.isAiming || atk > 0 || state.grip === 'pistol' ? 0 : this.sprintBlend * 0.65;
+        this.rightHandMount.quaternion.copy(localQuat).slerp(readyQuat, sprintCant);
         this.rightHandMount.updateWorldMatrix(true, false);
       }
     } else {
-      // Default resting holding pose
-      this.rightHandMount.rotation.set(Math.PI / 2, Math.PI / 2, 0);
+      // Default resting / reload holding pose
+      this.rightHandMount.quaternion.copy(readyQuat);
     }
   }
 }

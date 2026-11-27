@@ -1043,11 +1043,13 @@ export class PlayerController {
     // Keyboard camera look fallback
     const maxPitch = Math.PI / 2 - 0.05;
     const yawRate = this.controlsSettings.getKeyboardYawSpeed();
-    const pitchRate = this.controlsSettings.getKeyboardPitchSpeed() * this.controlsSettings.getYSign();
     if (this.keys['ArrowLeft']) this.yaw += yawRate * delta;
     if (this.keys['ArrowRight']) this.yaw -= yawRate * delta;
-    if (this.keys['ArrowUp']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch + pitchRate * delta));
-    if (this.keys['ArrowDown']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch - pitchRate * delta));
+    // Keep ArrowUp/ArrowDown for movement (same as W/S) so Shift+UpArrow runs cleanly instead of staring skyward;
+    // optional keyboard pitch uses PageUp/PageDown without hijacking movement keys.
+    const pitchRate = this.controlsSettings.getKeyboardPitchSpeed() * this.controlsSettings.getYSign();
+    if (this.keys['PageUp']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch + pitchRate * delta));
+    if (this.keys['PageDown']) this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch - pitchRate * delta));
 
     const hasEnergyForSprint = !this.inventory || this.inventory.energy > 4;
     const isSprinting =
@@ -1061,7 +1063,9 @@ export class PlayerController {
     const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).normalize();
 
     const inputDirection = new THREE.Vector3();
-    const keyFwd = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0);
+    const keyFwd =
+      (this.keys['KeyW'] || this.keys['ArrowUp'] ? 1 : 0) -
+      (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0);
     const keyStrafe = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
     const fwdAxis = Math.max(-1, Math.min(1, keyFwd + this.controlsSettings.moveZ));
     const strafeAxis = Math.max(-1, Math.min(1, keyStrafe + this.controlsSettings.moveX));

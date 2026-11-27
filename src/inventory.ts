@@ -1294,8 +1294,9 @@ export class InventorySystem {
         if (nameEl) nameEl.innerText = item.shortName;
         if (countEl) {
           if (item.kind === 'weapon') {
-            countEl.innerText = `${item.clip}/${item.maxClip}`;
-            countEl.style.color = item.clip === 0 ? '#ff6b6b' : '#feca57';
+            const reserve = item.caliber ? this.getCaliberReserve(item.caliber) : 0;
+            countEl.innerText = `${item.clip}/${reserve}`;
+            countEl.style.color = item.clip === 0 && reserve === 0 ? '#ff4757' : item.clip === 0 ? '#ff6b6b' : '#feca57';
           } else if (item.kind === 'melee') {
             countEl.innerText = '∞';
             countEl.style.color = '#70a1ff';
@@ -1315,7 +1316,7 @@ export class InventorySystem {
       } else if (active.kind === 'weapon' && active.caliber) {
         const cal = CALIBERS[active.caliber];
         const reserve = this.getCaliberReserve(active.caliber);
-        pill.innerText = `${active.name} (${cal.shortName}) • Clip ${active.clip}/${active.maxClip} | Reserve ${reserve}`;
+        pill.innerText = `${active.name} (${cal.shortName}) • ${active.clip}/${reserve} (Mag ${active.maxClip})`;
       } else if (active.kind === 'ammo' && active.caliber) {
         pill.innerText = `${active.name} (x${active.count}) • Fits ${CALIBERS[active.caliber].shortName} Guns`;
       } else if (active.kind === 'melee') {
