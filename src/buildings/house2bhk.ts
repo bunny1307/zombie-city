@@ -144,6 +144,7 @@ export class House2BHKBuilding {
     const faucet = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.28, 6), GameMaterials.ivPoleMetal);
     faucet.position.set(8.55, 1.28, 2.4);
     this.group.add(faucet);
+    this.arch.registerBoxCollider(8.55, 1.28, 2.4, 0.12, 0.28, 0.12, 'house_prop');
 
     // Overhead Kitchen Wall Cabinets (Fridge & Electric Stove added via CC0 models)
     this.arch.addSolidBox(8.55, 2.45, 3.2, 0.45, 0.75, 4.2, GameMaterials.woodPlanks, false);
@@ -170,6 +171,7 @@ export class House2BHKBuilding {
       const shade = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.16, 0.22, 8), GameMaterials.lightGlowYellow);
       shade.position.set(-8.4, 0.92, nz);
       this.group.add(shade);
+      this.arch.registerBoxCollider(-8.4, 0.92, nz, 0.32, 0.22, 0.32, 'house_prop');
     }
 
     // Tall Wardrobe Closet
@@ -209,6 +211,7 @@ export class House2BHKBuilding {
     const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.85, 0.6), GameMaterials.glassClean);
     mirror.position.set(-0.86, 1.5, -4.1);
     this.group.add(mirror);
+    this.arch.registerBoxCollider(-0.86, 1.5, -4.1, 0.06, 0.85, 0.6, 'house_prop');
 
     this.arch.addCeilingLight(1, this.wallHeight, -3.5, true, 0xe8f4ff, 1.3, 8);
   }

@@ -1273,6 +1273,7 @@ export class WorldDecorator {
       d.position.set(-88.78, 0.44, 66.4);
       d.rotation.y = 1.45;
       this.createCullGroup(-85, 60, 75).add(d);
+      this.addOBBForMesh(d, 'cc0_door');
     }
     if (doorFront) {
       const doorEntries = [
@@ -1298,6 +1299,7 @@ export class WorldDecorator {
         d.position.set(e.x, e.y, e.z);
         d.rotation.y = e.rot;
         this.createCullGroup(e.cx, e.cz, 85).add(d);
+        this.addOBBForMesh(d, 'cc0_door');
       }
     }
 
@@ -1332,10 +1334,38 @@ export class WorldDecorator {
         leaf.position.set(idoor.swingX, idoor.y, idoor.swingZ);
         leaf.rotation.y = idoor.swingRot;
         grp.add(leaf);
+        this.addOBBForMesh(leaf, 'cc0_door');
       }
     }
 
     // Open-side patio cutout at living_room_suite does not have an exterior doorway wall; keep entry clear.
+  }
+
+  /**
+   * Computes an exact rotated OBB from any placed prop/door mesh (handling hinge pivots cleanly).
+   */
+  private addOBBForMesh(obj: THREE.Object3D, tag = 'cc0_prop') {
+    const savedRotY = obj.rotation.y;
+    const savedPos = obj.position.clone();
+    obj.position.set(0, 0, 0);
+    obj.rotation.set(0, 0, 0);
+    obj.updateMatrixWorld(true);
+    const localBox = new THREE.Box3().setFromObject(obj);
+    obj.position.copy(savedPos);
+    obj.rotation.y = savedRotY;
+    obj.updateMatrixWorld(true);
+    if (localBox.isEmpty()) return;
+    const size = localBox.getSize(new THREE.Vector3());
+    const center = localBox
+      .getCenter(new THREE.Vector3())
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), savedRotY)
+      .add(savedPos);
+    this.player.addOBB(
+      center,
+      new THREE.Vector3(Math.max(0.06, size.x), Math.max(0.06, size.y), Math.max(0.06, size.z)),
+      savedRotY,
+      tag
+    );
   }
 
   /**
@@ -1481,6 +1511,8 @@ export class WorldDecorator {
           rotY,
           'cc0_furniture'
         );
+      } else if (tmpl !== doormat) {
+        this.addOBBForMesh(obj, 'cc0_prop');
       }
       return obj;
     };
@@ -1503,6 +1535,7 @@ export class WorldDecorator {
       obj.position.set(hit.point.x + hit.nx * depthOffset, y, hit.point.z + hit.nz * depthOffset);
       obj.rotation.y = hit.rotY;
       parent.add(obj);
+      this.addOBBForMesh(obj, 'cc0_wall_prop');
       return obj;
     };
 
@@ -1525,6 +1558,7 @@ export class WorldDecorator {
         mon.position.set(x, deskTopY, z);
         mon.rotation.y = rotY;
         parent.add(mon);
+        this.addOBBForMesh(mon, 'cc0_prop');
       }
       if (keyboard) {
         const kb = keyboard.object.clone(true);
@@ -1533,6 +1567,7 @@ export class WorldDecorator {
         kb.position.set(x + fwdX, deskTopY, z + fwdZ);
         kb.rotation.y = rotY;
         parent.add(kb);
+        this.addOBBForMesh(kb, 'cc0_prop');
       }
     };
 
